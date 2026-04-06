@@ -1,12 +1,20 @@
 """Ralph CLI entry point."""
+import asyncio
 import sys
+import uuid
 import warnings
 from pathlib import Path
 
 import click
 import yaml
 
+from ralph.agents.runner import AgentRunner
 from ralph.config.loader import ConfigError, load_config
+from ralph.core.orchestrator import Orchestrator
+from ralph.core.orchestrator import OrchestratorConfig as OrchestratorRunConfig
+from ralph.core.task_graph import Task, TaskGraph, TaskStatus
+from ralph.llm.ollama_client import OllamaClient
+from ralph.memory.state import StateManager
 
 
 @click.group()
@@ -48,7 +56,7 @@ def run_task(ctx: click.Context, task, dry_run, resume, fresh, yes, verbose):
     with warnings.catch_warnings(record=True):
         warnings.simplefilter("always")
         try:
-            load_config(global_config_path=config_path, project_dir=project_dir)
+            cfg = load_config(global_config_path=config_path, project_dir=project_dir)
         except ConfigError as e:
             click.echo(f"Error: {e}", err=True)
             sys.exit(1)
@@ -56,9 +64,61 @@ def run_task(ctx: click.Context, task, dry_run, resume, fresh, yes, verbose):
     if dry_run:
         click.echo(f"[DRY RUN] Task: {task}")
         click.echo("(Dispatch skipped — dry-run mode)")
-    else:
-        click.echo(f"Task: {task}")
-        click.echo("(Orchestration loop not yet implemented — Phase 5)")
+        return
+
+    state_dir = Path(project_dir) / ".ralph"
+    state_manager = StateManager(state_dir=state_dir)
+
+    if fresh and state_manager.has_saved_state:
+        state_manager.clear()
+        click.echo("Cleared previous session state.")
+
+    llm = OllamaClient(
+        model=cfg.orchestrator.model,
+        endpoint=cfg.orchestrator.endpoint,
+        max_tokens=cfg.orchestrator.context_budget.get("planning", 2048),
+    )
+
+    orch_config = OrchestratorRunConfig(
+        model=cfg.orchestrator.model,
+        endpoint=cfg.orchestrator.endpoint,
+        context_budget=cfg.orchestrator.context_budget,
+        max_retries=cfg.orchestrator.max_retries,
+    )
+
+    orchestrator = Orchestrator(
+        config=orch_config,
+        agents=cfg.agents,
+        routing_rules=cfg.routing_rules,
+        llm=llm,
+        runner_factory=lambda agent_cfg: AgentRunner(agent_config=agent_cfg),
+    )
+
+    # Build a single-task graph from the user's task string
+    session_id = str(uuid.uuid4())
+    graph = TaskGraph(session_id=session_id, goal=task)
+    first_agent = next(iter(cfg.agents)) if cfg.agents else None
+    t = Task(id="task-0", description=task, agent=first_agent)
+    graph = graph.with_task(t)
+
+    click.echo(f"Running: {task}")
+    final = asyncio.run(orchestrator.run(graph=graph, state_dir=state_dir))
+
+    failed = [t for t in final.tasks.values() if t.status == TaskStatus.FAILED]
+    done = [t for t in final.tasks.values() if t.status == TaskStatus.DONE]
+
+    if verbose:
+        for t in final.tasks.values():
+            if t.result and t.result.output:
+                click.echo(f"\n--- {t.id} output ---\n{t.result.output}")
+
+    if failed:
+        for t in failed:
+            err = t.result.error if t.result else "unknown error"
+            click.echo(f"Failed: {t.description}\n  {err}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Complete. {len(done)} task(s) done.")
 
 
 @cli.group()
