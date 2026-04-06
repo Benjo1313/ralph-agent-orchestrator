@@ -1,0 +1,83 @@
+# Ralph Global Config
+# Copy to ~/.ralph/config.yaml and customize
+
+orchestrator:
+  model: gemma4:27b                    # Ollama model name
+  provider: ollama
+  endpoint: http://localhost:11434     # Ollama server address (your GPU machine)
+  context_budget:
+    planning: 4096                     # Max tokens for task decomposition prompts
+    routing: 2048                      # Max tokens for agent selection prompts
+    evaluation: 3072                   # Max tokens for result assessment prompts
+    retry: 2048                        # Max tokens for retry instruction prompts
+  re_anchor_interval: 5               # Re-state original goal every N tasks
+  max_retries: 3                       # Max retry attempts per task before escalation
+  journal_interval: session_end        # When to write journal: "session_end" or integer (every N tasks)
+
+# Agent definitions — each must have a unique key
+# type: "cli" (subprocess) or "api" (direct SDK call)
+agents:
+  claude_code:
+    type: cli
+    command: claude
+    flags: ["--print"]
+    description: "Full-featured coding agent with git awareness and tool use"
+    strengths: ["architecture", "complex_logic", "refactoring", "debugging"]
+
+  codex:
+    type: cli
+    command: codex
+    description: "Fast implementation agent"
+    strengths: ["straightforward_implementation", "boilerplate"]
+
+  claude_api:
+    type: api
+    provider: anthropic
+    model: claude-sonnet-4-6
+    description: "Lightweight API calls for review and quick analysis"
+    strengths: ["code_review", "summarization", "quick_decisions"]
+
+  openai_api:
+    type: api
+    provider: openai
+    model: gpt-4o
+    description: "Alternative API for specific tasks"
+    strengths: ["translation", "documentation"]
+
+# Routing rules — Ralph uses these as guidance, not hard constraints
+# "prefer" names an agent key from above
+# "when" is an optional condition (evaluated by Ralph)
+routing:
+  rules:
+    - task_type: architecture
+      prefer: claude_code
+      reason: "Complex reasoning benefits from full tool access"
+    - task_type: test_writing
+      prefer: claude_code
+      reason: "Needs to read existing code and run tests"
+    - task_type: implementation
+      prefer: codex
+      when: "complexity < medium"
+    - task_type: implementation
+      prefer: claude_code
+      when: "complexity >= medium"
+    - task_type: code_review
+      prefer: claude_api
+      reason: "Lightweight, doesn't need file editing"
+
+# Skill definitions — pre-prompted workflows dispatched through agents
+# "invoke" is the slash command prepended to the agent prompt
+# "use_when" lists task types that should use this skill
+skills:
+  tdd:
+    agent: claude_code
+    invoke: "/tdd"
+    use_when: ["test_writing", "implementation_with_tests"]
+  code_review:
+    agent: claude_code
+    invoke: "/code-review"
+    use_when: ["code_review"]
+
+# API keys are loaded from environment variables:
+#   ANTHROPIC_API_KEY — for claude_api agent
+#   OPENAI_API_KEY    — for openai_api agent
