@@ -6,15 +6,23 @@
 
 ## Overview
 
-Ralph is a Python CLI tool that uses a local LLM (Gemma 4 27B via Ollama) to orchestrate multiple AI coding agents (Claude Code, Codex, direct API calls) in a stateful, self-correcting development loop. The orchestrator plans work, decomposes tasks, routes them to the best available agent, evaluates results, and retries or escalates on failure — minimizing human intervention while keeping context usage efficient.
+Ralph is a Python CLI tool that orchestrates multiple AI coding agents in a stateful, self-correcting development loop. The orchestrator manages workflow, context, routing, retries, and escalation around stronger execution agents.
+
+The default operating model is **local-first and CLI-first**:
+
+- installed coding-agent CLIs handle the deepest implementation reasoning
+- Ralph handles orchestration, prompt shaping, and state continuity around them
+- direct provider APIs are optional integrations, not a requirement
+- current implementation still uses a local Gemma model for some planning and evaluation paths
 
 ## Motivation
 
 - **Reduce human-in-the-loop overhead** — autonomous plan-execute-evaluate loop
 - **Smart model routing** — use the right model/agent for each task type via config
-- **Context efficiency** — local 27B orchestrator stays lean; heavy reasoning delegated to capable cloud models
-- **Pluggable execution** — Claude Code, Codex, direct API, or future backends behind a uniform interface
+- **Context efficiency** — local orchestrator stays lean and works from compressed task/result summaries
+- **Pluggable execution** — Claude Code, Codex, optional direct API, or future backends behind a uniform interface
 - **Project portability** — works on any codebase via per-project config profiles
+- **Low-friction onboarding** — useful even when a user has no provider API billing enabled
 
 ## Architecture
 
@@ -24,20 +32,22 @@ Ralph is a Python CLI tool that uses a local LLM (Gemma 4 27B via Ollama) to orc
 2. **Orchestrator Core** — Main loop: plan, dispatch, evaluate, decide. Consults Gemma via Ollama at each decision point
 3. **Task Graph** — In-memory data structure (persisted to JSON) tracking tasks, statuses, dependencies, results, and ownership
 4. **Agent Registry** — Pluggable execution backends registered via config. Each implements a common interface: `execute(task) -> result`
-5. **Skill Registry** — Maps task types to pre-prompted agent skills (e.g., TDD workflow, code review). Dispatches agents with the appropriate skill pre-loaded
-6. **Router** — Takes a task + config routing rules and picks which agent + skill to use. Gemma makes the call, informed by config policy
+5. **Skill Registry** — Maps task types to pre-prompted agent skills (e.g., TDD workflow, code review). In the target model, dispatches agents with the appropriate skill pre-loaded
+6. **Router** — Takes a task plus config routing rules and picks which agent to use. The current implementation is config-driven, with room for richer reasoning later
 7. **Evaluator** — Assesses each task result: pass, retry (with adjusted instructions), or escalate to human. Gemma handles this with structured output
 8. **Config System** — Two-tier: global orchestrator config + per-project config
 9. **Memory System** — Two-layer project memory for context recovery across sessions
 
-### Execution Backends (MVP)
+### Execution Backends
 
 | Backend | Type | Use Case |
 |---------|------|----------|
 | Claude Code | CLI (`claude --print`) | Complex implementation, architecture, debugging, TDD |
 | Codex | CLI | Straightforward implementation, boilerplate |
-| Claude API | Direct API (Anthropic SDK) | Code review, summarization, quick analysis |
-| OpenAI API | Direct API (OpenAI SDK) | Alternative for specific tasks |
+| Claude API | Direct API (Anthropic SDK, optional) | Code review, summarization, quick analysis |
+| OpenAI API | Direct API (OpenAI SDK, optional) | Alternative for specific tasks |
+
+CLI backends are the primary path. API backends are optional and depend on separate provider billing.
 
 New backends can be added via config without code changes — any CLI tool or API that accepts a prompt and returns a result.
 
@@ -48,8 +58,8 @@ User runs: ralph "add dark mode toggle to settings"
 
 1. LOAD    — Read global config + project config + project state (if resuming)
 2. PLAN    — Gemma decomposes task into ordered subtasks with types and dependencies
-3. ROUTE   — For each ready task, Gemma picks agent + skill based on routing rules
-4. DISPATCH — Python invokes the chosen agent (subprocess for CLI, SDK call for API)
+3. ROUTE   — For each ready task, Ralph applies routing rules to pick an agent
+4. DISPATCH — Python invokes the chosen agent (usually subprocess for CLI, optionally SDK call for API)
              Agent receives scoped context: only relevant files, task description,
              upstream results
 5. COLLECT — Parse agent result: exit code, files modified (git diff), test output,
@@ -59,7 +69,7 @@ User runs: ralph "add dark mode toggle to settings"
 8. COMPLETE — Write journal entry, report results to user
 ```
 
-Ralph (Gemma) is consulted at decision points only (steps 2, 3, 6). The Python code drives the loop — Ralph never controls flow directly.
+The Python code drives the loop. Current implementation still consults Gemma at planning and evaluation decision points, but the intended architecture is that Ralph remains the control plane while stronger execution agents do the heaviest project reasoning.
 
 ### Human Escalation Triggers
 
@@ -119,9 +129,9 @@ Ralph works on Project A, switches to Project B for days, returns to Project A. 
 
 Written by the Python orchestrator code after every task cycle. Deterministic, not LLM-generated.
 
-**Layer 2: Journal (`.ralph/journal/`) — natural language, LLM-generated**
-- Short narrative entries written at session end (or configurable intervals)
-- Captures reasoning: why decisions were made, what was surprising, what approach was taken on retries
+**Layer 2: Journal (`.ralph/journal/`) — human-readable session summaries**
+- Markdown entries written at session end, with optional checkpoint entries when `journal_interval` is numeric
+- Captures planning changes, completed tasks, retries, escalations, and overall run outcome
 - Advisory context, not authoritative — state file is the source of truth
 
 ### Resume Flow
@@ -129,10 +139,10 @@ Written by the Python orchestrator code after every task cycle. Deterministic, n
 When Ralph resumes a project:
 1. Load static project config (conventions, commands, structure)
 2. Load state file — programmatically extract "here's where you left off"
-3. Load last 2-3 journal entries — gives Ralph the *why* behind current state
-4. Construct a focused resume prompt within context budget
+3. Continue from the saved task graph
+4. Use journal entries as a human review surface if needed
 
-State file determines *what to do next*. Journal helps Ralph understand *how to approach it*.
+State file determines *what to do next*. Journal gives the operator a compact record of what happened in each run.
 
 ## Skill Registry
 
@@ -140,7 +150,7 @@ Ralph can dispatch agents with pre-prompted skills — curated prompt templates 
 
 ### How It Works
 
-Instead of just picking "claude_code," Ralph picks "claude_code with the `tdd` skill." The dispatch layer invokes Claude Code with that skill pre-loaded.
+Instead of just picking "claude_code," the target model lets Ralph pick "claude_code with the `tdd` skill." The dispatch layer can then invoke Claude Code with that skill pre-loaded.
 
 ### Config
 
@@ -164,7 +174,7 @@ skills:
 
 ### Invocation Mechanism
 
-For CLI agents, skills are prepended to the task prompt: `claude --print "/tdd Write failing tests for dark mode storage"`. The skill slash command loads the skill's prompt template, then the task description follows. Exact invocation syntax may vary per CLI tool — the dispatch layer abstracts this.
+For CLI agents, the mechanism is to prepend the skill invoke string at the top of Ralph's execution envelope so agent-native slash commands still trigger correctly. Ralph then delivers that envelope either as a trailing argument or through stdin, depending on agent config.
 
 ### Constraints
 
@@ -196,12 +206,14 @@ agents:
     type: cli
     command: claude
     flags: ["--print"]
+    prompt_mode: argument
     description: "Full-featured coding agent with git awareness and tool use"
     strengths: ["architecture", "complex_logic", "refactoring", "debugging"]
 
   codex:
     type: cli
     command: codex
+    prompt_mode: argument
     description: "Fast implementation agent"
     strengths: ["straightforward_implementation", "boilerplate"]
 
@@ -278,7 +290,7 @@ project:
 ### Config Design Decisions
 
 - **YAML over JSON** — human-editable, comments supported
-- **Agent `strengths` are hints** — Ralph can override routing rules if it reasons about it
+- **Agent `strengths` are hints** — they help planning and operator understanding even when routing remains rule-driven
 - **Project config overrides global** — per-project routing takes precedence
 - **`orchestrator_context` is a system prompt fragment** — shapes Ralph's behavior per-project
 
@@ -286,16 +298,16 @@ project:
 
 | Phase | Scope |
 |-------|-------|
-| **A (MVP)** | Serial task loop: plan → route → dispatch → evaluate → retry/advance. Single agent at a time. CLI interface. Config system. State persistence. Project memory. Skill registry (headless skills only). |
-| **B (Parallelism)** | Multiple agents running simultaneously on independent subtasks. File-level ownership enforcement. Dependency-aware scheduling. |
-| **C (Full Vision)** | Web dashboard for monitoring parallel agents. Interactive skill support. Cross-project learning. Agent capability discovery. Community skill/agent plugins. |
+| **A (Foundation)** | Config system, CLI interface, state persistence, serial task execution skeleton, routing rules, and agent dispatch foundations. |
+| **B (Intelligence Loop)** | Planner-driven task decomposition, evaluator-driven pass/retry/escalate decisions, retry handling, optional API dispatch, and a CLI-first operating model. Current direction updates prioritize skill-aware CLI dispatch, durable resume, journaling, and CLI adapter hardening. |
+| **C (Advanced Orchestration)** | Parallel task execution, stronger multi-agent coordination, durable recovery across longer sessions, human approval workflows, richer long-horizon memory, and monitoring surfaces. |
 
 ## Tech Stack
 
 - **Python 3.12+** — orchestrator implementation
 - **Ollama** — local Gemma 4 27B hosting
-- **Anthropic SDK** — direct Claude API calls
-- **OpenAI SDK** — direct GPT API calls
+- **Anthropic SDK** — optional direct Claude API calls
+- **OpenAI SDK** — optional direct GPT API calls
 - **PyYAML** — config parsing
 - **Click or Typer** — CLI framework
 - **subprocess** — CLI agent invocation

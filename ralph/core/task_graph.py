@@ -1,9 +1,8 @@
 """Task graph models for Ralph's orchestration loop."""
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Self
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field
 
 
 class TaskStatus(StrEnum):
@@ -11,23 +10,33 @@ class TaskStatus(StrEnum):
     IN_PROGRESS = "in_progress"
     DONE = "done"
     FAILED = "failed"
+    ESCALATED = "escalated"
     SKIPPED = "skipped"
 
     @property
     def is_terminal(self) -> bool:
-        return self in (TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.SKIPPED)
+        return self in (
+            TaskStatus.DONE,
+            TaskStatus.FAILED,
+            TaskStatus.ESCALATED,
+            TaskStatus.SKIPPED,
+        )
 
 
 class TaskResult(BaseModel):
     success: bool
     output: str | None = None
     error: str | None = None
-    completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    exit_code: int | None = None
+    completed_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class Task(BaseModel, frozen=True):
     id: str
     description: str
+    task_type: str | None = None
+    acceptance_criteria: str | None = None
+    retry_guidance: str | None = None
     status: TaskStatus = TaskStatus.PENDING
     agent: str | None = None
     dependencies: list[str] = Field(default_factory=list)
@@ -43,14 +52,14 @@ class TaskGraph(BaseModel, frozen=True):
     session_id: str
     goal: str
     tasks: dict[str, Task] = Field(default_factory=dict)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     def with_task(self, task: Task) -> "TaskGraph":
         """Return a new TaskGraph with the task added or updated."""
         updated_tasks = {**self.tasks, task.id: task}
         return self.model_copy(
-            update={"tasks": updated_tasks, "updated_at": datetime.now(timezone.utc)}
+            update={"tasks": updated_tasks, "updated_at": datetime.now(UTC)}
         )
 
     def ready_tasks(self) -> list[Task]:
@@ -73,4 +82,7 @@ class TaskGraph(BaseModel, frozen=True):
 
     @property
     def has_failures(self) -> bool:
-        return any(t.status == TaskStatus.FAILED for t in self.tasks.values())
+        return any(
+            t.status in (TaskStatus.FAILED, TaskStatus.ESCALATED)
+            for t in self.tasks.values()
+        )

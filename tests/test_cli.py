@@ -1,6 +1,5 @@
 """Tests for CLI entry point and config subcommands."""
 import textwrap
-from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -50,10 +49,42 @@ class TestCLIEntryPoint:
     def test_task_echoed(self, runner, global_config, tmp_path):
         result = runner.invoke(
             cli,
-            ["--config", str(global_config), "--project-dir", str(tmp_path), "run", "--dry-run", "add dark mode toggle"],
+            [
+                "--config",
+                str(global_config),
+                "--project-dir",
+                str(tmp_path),
+                "run",
+                "--dry-run",
+                "add dark mode toggle",
+            ],
         )
         assert result.exit_code == 0
         assert "add dark mode toggle" in result.output
+
+    def test_run_requires_task_unless_resume(self, runner, global_config, tmp_path):
+        result = runner.invoke(
+            cli,
+            ["--config", str(global_config), "--project-dir", str(tmp_path), "run"],
+        )
+        assert result.exit_code != 0
+        assert "TASK is required unless using --resume" in result.output
+
+    def test_run_rejects_task_with_resume(self, runner, global_config, tmp_path):
+        result = runner.invoke(
+            cli,
+            [
+                "--config",
+                str(global_config),
+                "--project-dir",
+                str(tmp_path),
+                "run",
+                "--resume",
+                "add dark mode toggle",
+            ],
+        )
+        assert result.exit_code != 0
+        assert "TASK cannot be provided when using --resume" in result.output
 
 
 class TestConfigSubcommands:
@@ -73,10 +104,41 @@ class TestConfigSubcommands:
         assert result.exit_code == 0
         assert "valid" in result.output.lower()
 
+    def test_config_validate_accepts_disabled_control_plane_without_ollama(self, runner, tmp_path):
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(textwrap.dedent("""\
+            orchestrator:
+              planning_mode: disabled
+              evaluation_mode: disabled
+            agents:
+              claude_code:
+                type: cli
+                command: claude
+                description: "Claude Code"
+            routing:
+              rules: []
+            skills: {}
+        """))
+
+        result = runner.invoke(
+            cli,
+            ["--config", str(config_path), "--project-dir", str(tmp_path), "config", "validate"],
+        )
+
+        assert result.exit_code == 0
+        assert "Config is valid" in result.output
+
     def test_config_validate_missing(self, runner, tmp_path):
         result = runner.invoke(
             cli,
-            ["--config", str(tmp_path / "missing.yaml"), "--project-dir", str(tmp_path), "config", "validate"],
+            [
+                "--config",
+                str(tmp_path / "missing.yaml"),
+                "--project-dir",
+                str(tmp_path),
+                "config",
+                "validate",
+            ],
         )
         assert result.exit_code != 0
 

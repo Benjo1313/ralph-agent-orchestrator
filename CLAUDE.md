@@ -1,146 +1,248 @@
-# Ralph — Local LLM Multi-Agent Development Orchestrator
+# Ralph - Local LLM Multi-Agent Development Orchestrator
 
-Python CLI tool that uses a local LLM (Gemma 4 27B via Ollama) to orchestrate AI coding agents (Claude Code, Codex, direct API calls) in a stateful, self-correcting development loop.
+Python CLI tool that orchestrates AI coding agents in a stateful, self-correcting development loop. A local Gemma/Ollama model remains available for optional control-plane planning and evaluation.
+
+Default product posture:
+- local-first orchestration
+- CLI-first execution
+- API agents supported, but optional
 
 ## Tech Stack
 
-- **Python 3.12+**
-- **Click** — CLI framework
-- **Pydantic v2** — config validation and immutable data models (`frozen=True`)
-- **PyYAML** — config parsing
-- **Ollama** (Python SDK) — async local LLM client
-- **pytest + pytest-asyncio** — testing
-- **Ruff** — linting and formatting
+- Python 3.12+
+- Click
+- Pydantic v2
+- PyYAML
+- Ollama Python SDK
+- Anthropic SDK
+- OpenAI SDK
+- pytest + pytest-asyncio
+- Ruff
 
 ## Project Structure
 
-```
+```text
 ralph/
-├── ralph/
-│   ├── cli/
-│   │   └── main.py              — Click CLI: `ralph run`, `ralph config *`
-│   ├── core/
-│   │   ├── orchestrator.py      — Serial task execution loop; dispatches tasks, saves state
-│   │   ├── router.py            — Maps task types to agents via ordered routing rules
-│   │   └── task_graph.py        — Task, TaskGraph, TaskStatus, TaskResult — all immutable Pydantic models
-│   ├── agents/
-│   │   └── runner.py            — AgentRunner: CLI subprocess dispatch + API dispatch (stub)
-│   ├── llm/
-│   │   └── ollama_client.py     — Async Ollama wrapper (OllamaClient, Message, Role, OllamaError)
-│   ├── skills/
-│   │   └── registry.py          — SkillRegistry: skill lookup by name or use-case
-│   ├── memory/
-│   │   └── state.py             — StateManager: save/load TaskGraph as JSON to .ralph/state.json
-│   └── config/
-│       ├── schema.py            — Pydantic models: RalphConfig, AgentConfig, RoutingRule, SkillConfig, etc.
-│       └── loader.py            — Two-tier YAML config loading and merging (global + per-project)
-├── tests/
-│   ├── test_cli.py              — CLI command tests (Click CliRunner)
-│   ├── test_config.py           — Config loading, schema validation, two-tier merge
-│   ├── test_task_graph.py       — Task, TaskGraph, TaskStatus immutability and graph logic
-│   ├── test_state_manager.py    — StateManager save/load/clear
-│   ├── test_ollama_client.py    — OllamaClient (mocked ollama SDK)
-│   ├── test_agent_runner.py     — AgentRunner CLI subprocess and API dispatch
-│   ├── test_router.py           — Router rule matching, fallback, missing-agent skip
-│   ├── test_skill_registry.py   — SkillRegistry get/skills_for/list_all
-│   ├── test_orchestrator.py     — Orchestrator task loop, dependency handling, state persistence
-│   └── test_run_integration.py  — End-to-end `ralph run` via CliRunner + mocked subprocess
-├── docs/
-│   ├── ralph-orchestrator-design.md       — Full architecture spec
-│   └── ralph-mvp-implementation-plan.md   — Phase A implementation plan
-├── config.yaml.example          — Annotated global config template
-├── pyproject.toml
-└── README.md                    — User-facing docs with setup, config, and usage guide
+|-- ralph/
+|   |-- cli/
+|   |   `-- main.py
+|   |-- core/
+|   |   |-- orchestrator.py
+|   |   |-- planner.py
+|   |   |-- evaluator.py
+|   |   |-- router.py
+|   |   `-- task_graph.py
+|   |-- agents/
+|   |   `-- runner.py
+|   |-- llm/
+|   |   `-- ollama_client.py
+|   |-- skills/
+|   |   `-- registry.py
+|   |-- memory/
+|   |   `-- state.py
+|   `-- config/
+|       |-- schema.py
+|       `-- loader.py
+|-- tests/
+|   |-- conftest.py
+|   |-- test_cli.py
+|   |-- test_config.py
+|   |-- test_task_graph.py
+|   |-- test_state_manager.py
+|   |-- test_ollama_client.py
+|   |-- test_agent_runner.py
+|   |-- test_router.py
+|   |-- test_skill_registry.py
+|   |-- test_planner.py
+|   |-- test_evaluator.py
+|   |-- test_orchestrator.py
+|   `-- test_run_integration.py
+|-- docs/
+|   |-- ralph-orchestrator-design.md
+|   |-- ralph-mvp-implementation-plan.md
+|   |-- ralph-phase-b-implementation-plan.md
+|   |-- ralph-concerns.md
+|   |-- ralph-future-features.md
+|   |-- ralph-phase-b-replan.md
+|   `-- ralph-phase-b-status.md
+|-- config.yaml.example
+|-- pyproject.toml
+|-- README.md
+`-- CLAUDE.md
 ```
 
-**108 tests across 10 files, all passing.** Run `pytest` before every commit.
+133 tests across 12 files are passing.
 
-## Build & Test
+## Build And Test
 
 ```bash
 # Install in development mode
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 
 # Run all tests
-pytest
+python -m pytest -q -p no:cacheprovider
 
 # Run a specific test file
-pytest tests/test_orchestrator.py -v
+python -m pytest tests/test_orchestrator.py -v -p no:cacheprovider
 
-# Lint and format
-ruff check ralph/ tests/
-ruff format ralph/ tests/
+# Lint
+python -m ruff check ralph tests
+python -m ruff format ralph tests
 ```
+
+Notes:
+- In this sandbox, `pytest` temp and cache paths need to stay inside the workspace. Use `-p no:cacheprovider`.
+- `tests/conftest.py` overrides `tmp_path` to a repo-local temp directory for the same reason.
 
 ## Configuration
 
 Two-tier YAML config merged at runtime:
-- **Global:** `~/.ralph/config.yaml` — orchestrator settings, agent definitions, routing rules, skills
-- **Per-project:** `.ralph/project.yaml` — project name, conventions, test/build commands, routing overrides
+- Global: `~/.ralph/config.yaml`
+- Per-project: `.ralph/project.yaml`
 
-Merge behavior: project `routing_overrides` are **appended** after global routing rules (not replaced). Everything else is additive.
+Merge behavior:
+- Project `routing_overrides` are appended after global routing rules.
+- Everything else is additive.
 
-See `config.yaml.example` for the full annotated global config. Generate starters with:
-```bash
-ralph config init            # creates ~/.ralph/config.yaml
-ralph config init-project    # creates .ralph/project.yaml in current dir
-```
-
-API keys from environment variables: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
+API keys come from environment variables if API agents are used:
+- `ANTHROPIC_API_KEY`
+- `OPENAI_API_KEY`
 
 ## Key Architectural Conventions
 
-### Immutable Pydantic models (`frozen=True`)
-`Task` and `TaskGraph` are frozen Pydantic models — never mutate them. Always use `model_copy(update={...})` to produce a new instance. `TaskGraph.with_task(task)` is the canonical way to add or update a task in the graph.
+### Immutable models
+`Task` and `TaskGraph` are frozen Pydantic models. Never mutate them directly. Use `model_copy(update={...})` and `TaskGraph.with_task(...)`.
 
-```python
-# Correct — returns new graph
-graph = graph.with_task(task.model_copy(update={"status": TaskStatus.DONE}))
+### Runner injection
+`Orchestrator` accepts `runner_factory: Callable[[AgentConfig], AgentRunner]`. Tests inject mock runners; the CLI wires the real `AgentRunner`.
 
-# Wrong — will raise FrozenInstanceError
-task.status = TaskStatus.DONE
-```
+### Async boundary
+The orchestration loop is async, but Click handlers stay synchronous. The CLI uses `asyncio.run()` at the boundary.
 
-### `runner_factory` injection pattern
-`Orchestrator` does not create `AgentRunner` instances directly. It accepts a `runner_factory: Callable[[AgentConfig], AgentRunner]` argument. Tests pass a lambda that returns a mock runner without needing to patch internals. The CLI wires the real factory: `runner_factory=lambda agent_cfg: AgentRunner(agent_config=agent_cfg)`.
+### Dependency injection
+External boundaries are injected instead of being global:
+- Ollama client
+- agent runners
+- planner
+- evaluator
 
-### Async boundary at the CLI
-The entire orchestration loop is `async`. Click commands are synchronous. `asyncio.run()` is the explicit boundary at the end of each `@cli.command`. Do NOT use `async def` for Click command handlers — this breaks pytest integration (CliRunner-based tests must call synchronous functions).
+### Optional control-plane model
+`OrchestratorConfig` now supports:
+- `planning_mode: "local" | "disabled"`
+- `evaluation_mode: "local" | "disabled"`
 
-### Dependency injection throughout
-No global state. Every external dependency (Ollama, subprocess, APIs) is injected via constructor parameters and can be replaced with mocks in tests. `OllamaClient` is passed into `Orchestrator`; `AgentRunner` is passed in via the factory.
+When both are `disabled`, the CLI must not instantiate `OllamaClient`, `Planner`, or `Evaluator`. Ralph should still route, dispatch, resume, persist state, and journal correctly in that mode.
 
 ### Task routing
-`Router` matches tasks by `task_type` against ordered `RoutingRule` entries. First match wins. Rules whose `prefer` agent isn't in the agents dict are silently skipped. Falls back to the first configured agent if nothing matches. Tasks with an explicit `agent` field set in `Task` bypass routing entirely.
+`Router` matches `task_type` against ordered `RoutingRule` entries. First match wins. Missing preferred agents are skipped. If nothing matches, Ralph falls back to the first configured agent. Explicit `task.agent` bypasses routing.
+
+### Planning contract
+`Planner` asks Gemma for strict JSON with:
+- `id`
+- `description`
+- `task_type`
+- `dependencies`
+- `acceptance_criteria`
+
+If parsing or schema validation fails, Ralph retries once with a correction prompt. If that also fails, it falls back to a single-task graph.
+Planner also strips fenced/noisy output down to the JSON object before giving up, and rejects invalid task types, duplicate ids, self-dependencies, and references to missing tasks.
+
+### Evaluation contract
+`Evaluator` asks Gemma for strict JSON with:
+- `verdict`
+- `reason`
+- optional `adjusted_instructions`
+
+Allowed verdicts:
+- `PASS`
+- `RETRY`
+- `ESCALATE`
+
+If evaluation JSON is invalid, Ralph asks once for corrected JSON. If that also fails, it defaults optimistically to `PASS` so evaluator formatting errors do not block the loop.
+
+### Task lifecycle
+`Task` now carries:
+- `task_type`
+- `acceptance_criteria`
+- `attempt`
+
+`TaskStatus` includes:
+- `PENDING`
+- `IN_PROGRESS`
+- `DONE`
+- `FAILED`
+- `ESCALATED`
+- `SKIPPED`
+
+`ESCALATED` is terminal and means Ralph stopped automatically and needs human input. Dependents of failed or escalated tasks are marked `SKIPPED`.
 
 ### State persistence
-`StateManager` saves the full `TaskGraph` as JSON after every task completes. The JSON is written via `model_dump_json()` and loaded back via `TaskGraph.model_validate_json()`. `StateError` is raised on missing file, corrupt JSON, or schema mismatch. Never edit `state.json` by hand.
+`StateManager` saves the full `TaskGraph` as JSON after each task update. Never edit `state.json` by hand.
 
-### CLI agent dispatch
-CLI agents: `[command] + flags + [prompt]` passed to `asyncio.create_subprocess_exec`. Non-zero exit code → `RunResult(success=False)`. API agent dispatch is stubbed (returns `success=False` with a "not yet supported" error).
+### Agent dispatch
+CLI agents:
+- supports `prompt_mode: argument` and `prompt_mode: stdin`
+- CLI dispatch builds a compact execution envelope with task metadata and project context
+- non-zero exit codes return `RunResult(success=False, exit_code=...)` with surfaced stdout/stderr details
+- this is the primary execution path Ralph should optimize for
 
-## What's Built vs Planned
+API agents:
+- Anthropic via `AsyncAnthropic().messages.create(...)`
+- OpenAI via `AsyncOpenAI().chat.completions.create(...)`
+- API keys are read at call time
+- missing keys or SDK errors return `RunResult(success=False, error=...)`
+- these are optional integrations and should not be assumed in the baseline user setup
 
-**Built (Phase A — MVP):**
-- Config loading and validation (two-tier YAML, Pydantic schemas)
-- CLI: `ralph run`, `ralph run --dry-run`, `ralph run --fresh`, `ralph config show/validate/init/init-project`
-- Task graph: immutable `Task`/`TaskGraph`, dependency tracking, ready-task selection, skip-on-failure
-- State persistence: save/load/clear `state.json`
-- Ollama client: async `chat()` wrapper
-- Agent runner: CLI subprocess dispatch; API stub
-- Router: config-driven ordered rule matching with fallback
-- Skill registry: lookup by name and use-case
-- Orchestrator: serial task loop with dependency-aware scheduling and state writes after each task
+### Skills
+`SkillRegistry` exists and skills are included in planner context.
 
-**Not yet built (future phases):**
-- LLM-driven task planning (Gemma decomposing the user's goal into subtasks)
-- Result evaluation (Gemma assessing agent output and deciding retry/pass)
-- `--resume` flag (wired in CLI, not yet implemented in the loop)
-- API agent dispatch (Anthropic, OpenAI SDKs — infrastructure ready, SDK calls stubbed)
-- Journal / narrative log
-- Parallel task execution
+Current behavior:
+- CLI dispatch prepends the configured skill invoke string when `task.task_type` matches `SkillConfig.use_when` and the chosen agent matches `SkillConfig.agent`
+- if no skill matches, Ralph still sends the structured CLI execution envelope
+- API agents remain optional and do not depend on skill-prefixed dispatch
 
-## Design Docs
+## Built Status
 
-- `docs/ralph-orchestrator-design.md` — full architecture spec
-- `docs/ralph-mvp-implementation-plan.md` — Phase A plan
+Built through Phase B:
+- config loading and validation
+- CLI commands
+- immutable task graph and state persistence
+- Ollama chat wrapper
+- CLI and API agent dispatch
+- routing by task type
+- planner-driven task decomposition
+- evaluator-driven pass/retry/escalate decisions
+- retry loop with `max_retries`
+- escalation state handling
+- `--resume` state recovery in the orchestration loop
+- human-readable session journaling under `.ralph/journal/`
+- CLI adapter hardening with structured prompt envelopes, stdin support, and stricter agent validation
+- B8 prompt/context tightening with stronger planner/evaluator prompts, schema repair, and cleaner retry guidance rendering
+- optional local planning/evaluation modes so CLI-first runs do not require Ollama
+- integration and unit coverage for the full loop
+
+Current direction after Phase B:
+- keep the intelligence loop as-is
+- prioritize CLI-first usability
+- treat API agents as optional, not baseline
+- prioritize prompt/context tightening for Ralph-controlled decisions
+
+Still not built:
+- parallel task execution
+
+## Docs
+
+- `docs/ralph-orchestrator-design.md`
+- `docs/ralph-mvp-implementation-plan.md`
+- `docs/ralph-phase-b-implementation-plan.md`
+- `docs/ralph-concerns.md`
+- `docs/ralph-future-features.md`
+- `docs/ralph-phase-b-replan.md`
+- `docs/ralph-phase-b-status.md`
+
+## Known Doc Drift
+
+- Historical implementation authority for shipped Phase B work:
+  `docs/ralph-phase-b-implementation-plan.md`
+- Current direction authority for post-implementation priorities:
+  `docs/ralph-phase-b-replan.md`

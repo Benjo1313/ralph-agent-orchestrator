@@ -1,10 +1,10 @@
 """Tests for StateManager (load/save state.json, resume detection)."""
 import json
-import pytest
-from pathlib import Path
 
-from ralph.core.task_graph import Task, TaskStatus, TaskGraph
-from ralph.memory.state import StateManager, StateError
+import pytest
+
+from ralph.core.task_graph import Task, TaskGraph, TaskStatus
+from ralph.memory.state import StateError, StateManager
 
 
 @pytest.fixture
@@ -21,7 +21,11 @@ def manager(state_dir):
 def sample_graph():
     g = TaskGraph(session_id="session-abc", goal="Add dark mode toggle")
     t1 = Task(id="t1", description="Write failing test", status=TaskStatus.DONE)
-    t2 = Task(id="t2", description="Implement feature")
+    t2 = Task(
+        id="t2",
+        description="Implement feature",
+        retry_guidance="Fix the failing assertions before retrying",
+    )
     return g.with_task(t1).with_task(t2)
 
 
@@ -66,6 +70,7 @@ class TestStateManagerLoad:
         assert loaded.goal == sample_graph.goal
         assert loaded.tasks["t1"].status == TaskStatus.DONE
         assert loaded.tasks["t2"].status == TaskStatus.PENDING
+        assert loaded.tasks["t2"].retry_guidance == "Fix the failing assertions before retrying"
 
     def test_load_raises_when_no_state(self, manager):
         with pytest.raises(StateError, match="No saved state"):

@@ -1,10 +1,17 @@
 # Ralph Global Config
 # Copy to ~/.ralph/config.yaml and customize
+#
+# Default operating model:
+# - local Ollama for control-plane planning/evaluation when enabled
+# - CLI agents for execution
+# - API agents only if you have separate provider API billing enabled
 
 orchestrator:
-  model: gemma4:27b                    # Ollama model name
+  planning_mode: local                 # "local" or "disabled"
+  evaluation_mode: local               # "local" or "disabled"
+  model: gemma4:27b                    # Ollama model name (optional if both modes are disabled)
   provider: ollama
-  endpoint: http://localhost:11434     # Ollama server address (your GPU machine)
+  endpoint: http://localhost:11434     # Ollama server address (optional if both modes are disabled)
   context_budget:
     planning: 4096                     # Max tokens for task decomposition prompts
     routing: 2048                      # Max tokens for agent selection prompts
@@ -16,20 +23,27 @@ orchestrator:
 
 # Agent definitions — each must have a unique key
 # type: "cli" (subprocess) or "api" (direct SDK call)
+# CLI agents are the recommended default path.
+# CLI prompt delivery modes:
+# - argument: append the prompt as the final argv item
+# - stdin: write the prompt to the process stdin
 agents:
   claude_code:
     type: cli
     command: claude
     flags: ["--print"]
+    prompt_mode: argument
     description: "Full-featured coding agent with git awareness and tool use"
     strengths: ["architecture", "complex_logic", "refactoring", "debugging"]
 
   codex:
     type: cli
     command: codex
+    prompt_mode: argument
     description: "Fast implementation agent"
     strengths: ["straightforward_implementation", "boilerplate"]
 
+  # Optional API agents. Keep these only if you have provider API access enabled.
   claude_api:
     type: api
     provider: anthropic
@@ -62,12 +76,13 @@ routing:
       prefer: claude_code
       when: "complexity >= medium"
     - task_type: code_review
-      prefer: claude_api
-      reason: "Lightweight, doesn't need file editing"
+      prefer: claude_code
+      reason: "CLI-first default; uses the local agent path without API billing"
 
 # Skill definitions — pre-prompted workflows dispatched through agents
 # "invoke" is the slash command prepended to the agent prompt
 # "use_when" lists task types that should use this skill
+# Skill-aware dispatch is an active priority in the Phase B replan.
 skills:
   tdd:
     agent: claude_code
@@ -78,6 +93,6 @@ skills:
     invoke: "/code-review"
     use_when: ["code_review"]
 
-# API keys are loaded from environment variables:
+# API keys are loaded from environment variables if you use API agents:
 #   ANTHROPIC_API_KEY — for claude_api agent
 #   OPENAI_API_KEY    — for openai_api agent

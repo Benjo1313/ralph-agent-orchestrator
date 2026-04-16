@@ -29,13 +29,13 @@ class OllamaClient:
         self.endpoint = endpoint
         self.max_tokens = max_tokens
 
-    async def chat(self, messages: list[Message]) -> str:
+    async def chat(self, messages: list[Message], max_tokens: int | None = None) -> str:
         client = ollama.AsyncClient(host=self.endpoint)
         try:
             response = await client.chat(
                 model=self.model,
                 messages=[m.to_dict() for m in messages],
-                options={"num_predict": self.max_tokens},
+                options={"num_predict": max_tokens or self.max_tokens},
             )
         except Exception as e:
             raise OllamaError(str(e)) from e

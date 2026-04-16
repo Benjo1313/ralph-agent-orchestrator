@@ -1,8 +1,14 @@
 # Ralph
 
-Ralph is a local LLM orchestrator for AI-assisted software development. It sits between you and your coding agents (Claude Code, Codex, or direct API calls), using a local Gemma model to plan work, route tasks to the right agent, and run a self-correcting execution loop — all from your terminal.
+Ralph is a local orchestrator for AI-assisted software development. It sits between you and your coding agents, routing work and running a self-correcting execution loop from your terminal.
+
+Ralph is designed to be **CLI-first**: the default operating model is installed coding-agent CLIs such as Claude Code or Codex, with Ralph acting as the orchestration layer around them. Direct provider APIs are supported, but optional.
+
+Today, the implementation can still use a local Gemma model for control-plane planning and evaluation tasks, but those stages are optional. The intended product direction is that Ralph should coordinate and sharpen strong agents rather than try to out-plan them itself.
 
 You describe a task. Ralph figures out how to do it, picks the right agent, runs it, checks the result, and handles retries. You only get pulled in when something genuinely needs a human decision.
+
+The control-plane prompts are intentionally conservative: when local planning/evaluation are enabled, Ralph uses the local model to structure work, repair malformed JSON once, compress noisy execution output, and generate tighter retry guidance, while leaving deep implementation reasoning to the execution agent whenever possible.
 
 ---
 
@@ -36,31 +42,36 @@ Ralph:
   1. Loads your global config (~/.ralph/config.yaml) and
      your project config (.ralph/project.yaml)
 
-  2. Builds a task graph — a single task for MVP, multiple
-     subtasks once LLM planning is wired in
+  2. Optionally uses a local control-plane model to build a task graph
+     for the work; otherwise keeps the run as a single routed task
 
   3. For each task, picks the best agent using your routing rules
 
   4. Dispatches the task to the agent:
        - CLI agents (Claude Code, Codex): spawns a subprocess,
-         passes the task as a prompt, captures stdout
-       - API agents (Claude, GPT): calls the provider SDK directly
+         builds a compact execution envelope, sends it as a prompt,
+         captures stdout/stderr
+       - API agents (Claude, GPT): optionally calls the provider SDK directly
 
-  5. Persists the result to .ralph/state.json
+  5. Optionally evaluates the result locally to decide whether to
+     pass, retry, or escalate; otherwise trusts the raw dispatch result
 
-  6. Reports success or failure, exits nonzero on any failed task
+  6. Persists the updated graph to .ralph/state.json
+
+  7. Reports success or failure, exits nonzero on any failed
+     or escalated task
 ```
 
-**Ralph does not touch your code directly.** It delegates all code changes to your configured agents. Ralph's local Gemma model handles orchestration decisions (planning, routing, evaluation) — not implementation. This keeps the local model doing what a small model does well (structured decisions), and your cloud agents doing what they do well (understanding and writing code).
+**Ralph does not touch your code directly.** It delegates all code changes to your configured agents. Ralph's job is to manage workflow, context, retries, resume, and prompt shaping around those agents so they can operate more autonomously and consistently.
 
 ### What runs where
 
 | Component | Where it runs |
 |-----------|--------------|
 | Ralph CLI | Your local machine |
-| Gemma 4 27B (orchestrator) | Ollama on your GPU machine (can be remote) |
+| Gemma 4 27B (optional control-plane model) | Ollama on your GPU machine (can be remote) |
 | Claude Code / Codex (agents) | Your local machine (subprocess) |
-| Claude API / OpenAI API | Anthropic / OpenAI cloud |
+| Claude API / OpenAI API | Anthropic / OpenAI cloud, if configured |
 
 ---
 
@@ -69,15 +80,18 @@ Ralph:
 **Required:**
 
 - Python 3.12+
+- At least one configured agent, typically a CLI agent such as Claude Code or Codex
+
+**Required if `planning_mode` or `evaluation_mode` is `local`:**
+
 - [Ollama](https://ollama.com) running with your orchestrator model pulled
-- At least one configured agent (Claude Code CLI, Codex CLI, or an API key)
 
 **For CLI agents:**
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) — `npm install -g @anthropic-ai/claude-code`
 - [Codex](https://github.com/openai/codex) — `npm install -g @openai/codex`
 
-**For API agents:**
+**For API agents (optional):**
 
 - `ANTHROPIC_API_KEY` environment variable (for Claude API)
 - `OPENAI_API_KEY` environment variable (for OpenAI/GPT)
@@ -136,6 +150,8 @@ This creates `~/.ralph/config.yaml` from the bundled example. Edit it to match y
 
 ```yaml
 orchestrator:
+  planning_mode: local       # "local" or "disabled"
+  evaluation_mode: local     # "local" or "disabled"
   model: gemma4:27b          # The Ollama model name (must be pulled: ollama pull gemma4:27b)
   provider: ollama
   endpoint: http://localhost:11434  # Ollama server URL — change if running on another machine
@@ -149,22 +165,25 @@ orchestrator:
   journal_interval: session_end  # When to write a narrative log ("session_end" or a number)
 
 agents:
-  # CLI agents: Ralph spawns a subprocess and passes the task as a prompt argument.
+  # CLI agents: Ralph spawns a subprocess and sends a structured execution
+  # envelope either as a trailing prompt argument or over stdin.
   # The agent must be installed and on your PATH.
   claude_code:
     type: cli
     command: claude              # The command to run
     flags: ["--print"]           # Extra flags always passed before the prompt
+    prompt_mode: argument        # "argument" (default) or "stdin"
     description: "Full-featured coding agent with git awareness and tool use"
     strengths: ["architecture", "complex_logic", "refactoring", "debugging"]
 
   codex:
     type: cli
     command: codex
+    prompt_mode: argument
     description: "Fast implementation agent"
     strengths: ["straightforward_implementation", "boilerplate"]
 
-  # API agents: Ralph calls the provider SDK directly, no subprocess.
+  # API agents are optional integrations. Ralph calls the provider SDK directly.
   # API keys come from environment variables (see API Keys section below).
   claude_api:
     type: api
@@ -246,7 +265,9 @@ project:
 
 ### API keys
 
-API agents read keys from environment variables. Set these in your shell profile:
+API agents read keys from environment variables. This is optional if you are running Ralph in CLI-only mode.
+
+Set these in your shell profile if you want API-backed agents:
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-..."
@@ -254,6 +275,8 @@ export OPENAI_API_KEY="sk-..."
 ```
 
 CLI agents (Claude Code, Codex) handle their own authentication — they have their own login flows independent of Ralph.
+
+If both `planning_mode` and `evaluation_mode` are `disabled`, Ralph can operate without any Ollama model configured at all. In that mode, Ralph still routes, dispatches, journals, resumes, and persists state, but it skips local plan/evaluate steps.
 
 ### Validate your config
 
@@ -304,27 +327,33 @@ ralph config init-project   # Create .ralph/project.yaml in current directory
 
 Ralph supports two fundamentally different ways of talking to AI agents.
 
+For most users, CLI agents should be the primary path. They fit the local-first model best and do not require separate provider API billing.
+
 ### CLI agents (Claude Code, Codex)
 
-CLI agents are external programs installed on your machine. Ralph spawns them as subprocesses and passes your task as a prompt argument.
+CLI agents are external programs installed on your machine. Ralph spawns them as subprocesses and sends a compact execution envelope that includes the task, goal, retry attempt, acceptance criteria, and project context when available.
 
 **How the dispatch works:**
 
 ```
 ralph run "add dark mode toggle"
-  └─ Builds argv: ["claude", "--print", "add dark mode toggle"]
+  └─ Builds an execution envelope for the task
+  └─ Builds argv: ["claude", "--print", "<prompt>"]
   └─ Spawns subprocess via asyncio.create_subprocess_exec
   └─ Waits for it to finish
-  └─ Captures stdout as the result
-  └─ Nonzero exit code → task marked as FAILED
+  └─ Captures stdout and stderr
+  └─ Nonzero exit code → task marked as FAILED with surfaced subprocess details
 ```
 
 The agent sees your prompt and has full access to your filesystem, git history, and any tools it supports natively. Claude Code, for example, can read files, edit them, run tests, and commit — all driven by the prompt Ralph sends it.
 
 **Requirements for CLI agents:**
 - The `command` must be on your `PATH` (e.g., `which claude` should return a path)
-- The agent must accept a prompt as a trailing argument
-- Output goes to stdout; Ralph captures it after the process exits
+- The agent must support one of Ralph's prompt delivery modes:
+  - `prompt_mode: argument` → prompt is appended as the final argv item
+  - `prompt_mode: stdin` → prompt is written to stdin
+- You are responsible for configuring any non-interactive/headless flags the CLI requires
+- Ralph captures stdout and stderr after the process exits
 
 ### API agents (Anthropic, OpenAI)
 
@@ -341,7 +370,7 @@ ralph run "review this PR for security issues"
 
 API agents are best for tasks that don't need file editing: code review feedback, summarization, quick decisions, documentation generation. They cannot modify files on their own — if you need file changes, use a CLI agent.
 
-**Note:** API agent dispatch is stubbed in the current build. The routing, registry, and config support is complete; the SDK call implementation is the next development phase.
+API access is separate from ChatGPT and Claude subscriptions. If you do not have provider API billing enabled, leave API agents out of your config and use CLI agents only.
 
 ---
 
@@ -389,7 +418,7 @@ skills:
     use_when: ["test_writing", "implementation_with_tests"]
 ```
 
-When Ralph routes a task with type `test_writing`, it looks up skills registered for that use case, finds `tdd`, and dispatches Claude Code with `/tdd <your task>` as the prompt.
+Skills are part of Ralph's CLI-first operating model. For CLI agents, Ralph now prepends the configured skill invoke string automatically when a task's `task_type` matches `use_when` and the chosen agent matches the skill's configured agent. The skill invoke stays at the top of the CLI execution envelope so agent-native slash commands still trigger correctly. Skill definitions are also surfaced to the planner context.
 
 Skills are optional. If none match a task, Ralph sends the plain task description to the agent.
 
@@ -399,13 +428,16 @@ Skills are optional. If none match a task, Ralph sends the plain task descriptio
 
 Ralph writes session state to `.ralph/state.json` in your project directory after each task. This file tracks the task graph: what's been done, what's in progress, what failed, and the full results from each agent.
 
+Ralph also writes a separate human-readable journal entry under `.ralph/journal/` at session end. If `journal_interval` is set to a positive integer, Ralph additionally writes checkpoint summaries during longer runs.
+
 ```
 your-project/
 └── .ralph/
-    └── state.json    ← written by Ralph, updated after each task
+    ├── state.json    ← written by Ralph, updated after each task
+    └── journal/      ← markdown summaries for humans
 ```
 
-This file is machine-written. Don't edit it by hand.
+`state.json` is machine-written. Don't edit it by hand. The journal is advisory and exists so you can quickly review what Ralph attempted without reading raw task state.
 
 **To start fresh** (discard the saved state):
 
@@ -413,7 +445,13 @@ This file is machine-written. Don't edit it by hand.
 ralph run --fresh "new task description"
 ```
 
-**Resume** support (picking up an interrupted session) is on the roadmap — `--resume` flag is wired in the CLI but not yet implemented in the loop.
+**To resume** an interrupted session:
+
+```bash
+ralph run --resume
+```
+
+If Ralph finds an in-progress saved session and you try to start a new run without `--resume` or `--fresh`, it now stops and asks you to choose explicitly instead of silently overwriting that state.
 
 ---
 
@@ -435,6 +473,7 @@ ralph/
 │   ├── skills/
 │   │   └── registry.py          — SkillRegistry: skill lookup and resolution
 │   ├── memory/
+│   │   ├── journal.py           — Human-readable session summaries
 │   │   └── state.py             — StateManager: save/load state.json
 │   └── config/
 │       ├── schema.py            — Pydantic models for all config structures

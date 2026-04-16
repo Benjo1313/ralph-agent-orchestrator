@@ -1,10 +1,10 @@
 """Tests for config schema validation and loader."""
 import textwrap
-from pathlib import Path
 
 import pytest
-import yaml
+from pydantic import ValidationError
 
+from ralph.config.loader import ConfigError, load_config
 from ralph.config.schema import (
     AgentConfig,
     OrchestratorConfig,
@@ -13,8 +13,6 @@ from ralph.config.schema import (
     RoutingRule,
     SkillConfig,
 )
-from ralph.config.loader import load_config, ConfigError
-
 
 # ---------------------------------------------------------------------------
 # Schema tests
@@ -40,8 +38,50 @@ class TestOrchestratorConfig:
         assert cfg.context_budget["planning"] == 4096
 
     def test_missing_required_fields(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError, match="Local control-plane mode"):
             OrchestratorConfig()
+
+    def test_allows_disabled_control_plane_without_model_fields(self):
+        cfg = OrchestratorConfig(
+            planning_mode="disabled",
+            evaluation_mode="disabled",
+        )
+        assert cfg.model is None
+        assert cfg.endpoint is None
+
+    def test_requires_model_fields_when_evaluation_stays_local(self):
+        with pytest.raises(ValidationError, match="Local control-plane mode for evaluation"):
+            OrchestratorConfig(
+                planning_mode="disabled",
+                evaluation_mode="local",
+            )
+
+    def test_accepts_positive_integer_journal_interval(self):
+        cfg = OrchestratorConfig(
+            model="gemma4:27b",
+            provider="ollama",
+            endpoint="http://localhost:11434",
+            journal_interval=2,
+        )
+        assert cfg.journal_interval == 2
+
+    def test_rejects_invalid_journal_interval_string(self):
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(
+                model="gemma4:27b",
+                provider="ollama",
+                endpoint="http://localhost:11434",
+                journal_interval="sometimes",
+            )
+
+    def test_rejects_non_positive_integer_journal_interval(self):
+        with pytest.raises(ValidationError):
+            OrchestratorConfig(
+                model="gemma4:27b",
+                provider="ollama",
+                endpoint="http://localhost:11434",
+                journal_interval=0,
+            )
 
 
 class TestAgentConfig:
@@ -56,6 +96,23 @@ class TestAgentConfig:
         assert agent.type == "cli"
         assert agent.command == "claude"
 
+    def test_cli_agent_defaults_to_argument_prompt_mode(self):
+        agent = AgentConfig(
+            type="cli",
+            command="claude",
+            description="Claude Code",
+        )
+        assert agent.prompt_mode == "argument"
+
+    def test_cli_agent_accepts_stdin_prompt_mode(self):
+        agent = AgentConfig(
+            type="cli",
+            command="claude",
+            prompt_mode="stdin",
+            description="Claude Code",
+        )
+        assert agent.prompt_mode == "stdin"
+
     def test_api_agent(self):
         agent = AgentConfig(
             type="api",
@@ -68,8 +125,36 @@ class TestAgentConfig:
         assert agent.provider == "anthropic"
 
     def test_invalid_type(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             AgentConfig(type="invalid", description="bad")
+
+    def test_cli_agent_requires_command(self):
+        with pytest.raises(ValidationError, match="CLI agents require a command"):
+            AgentConfig(type="cli", description="bad")
+
+    def test_cli_agent_rejects_api_fields(self):
+        with pytest.raises(ValidationError, match="CLI agents cannot define API fields"):
+            AgentConfig(
+                type="cli",
+                command="claude",
+                provider="openai",
+                model="gpt-5",
+                description="bad",
+            )
+
+    def test_api_agent_requires_provider_and_model(self):
+        with pytest.raises(ValidationError, match="API agents require both provider and model"):
+            AgentConfig(type="api", description="bad")
+
+    def test_api_agent_rejects_command(self):
+        with pytest.raises(ValidationError, match="API agents cannot define a CLI command"):
+            AgentConfig(
+                type="api",
+                provider="openai",
+                model="gpt-5",
+                command="codex",
+                description="bad",
+            )
 
 
 class TestRoutingRule:
@@ -123,7 +208,7 @@ class TestProjectConfig:
 
 class TestRalphConfig:
     def test_requires_orchestrator(self):
-        with pytest.raises(Exception):
+        with pytest.raises(ValidationError):
             RalphConfig(agents={}, routing_rules=[], skills={})
 
 
@@ -211,7 +296,12 @@ class TestLoadConfig:
         assert config.project is not None
         assert config.project.name == "GetReady"
 
-    def test_project_routing_overrides_merge(self, tmp_path, global_config_yaml, project_config_yaml):
+    def test_project_routing_overrides_merge(
+        self,
+        tmp_path,
+        global_config_yaml,
+        project_config_yaml,
+    ):
         global_cfg = tmp_path / "config.yaml"
         global_cfg.write_text(global_config_yaml)
 
@@ -240,6 +330,34 @@ class TestLoadConfig:
 
         config = load_config(global_config_path=global_cfg, project_dir=tmp_path / "empty")
         assert config.project is None
+
+    def test_disabled_control_plane_can_omit_ollama_fields(self, tmp_path):
+        global_cfg = tmp_path / "config.yaml"
+        global_cfg.write_text(
+            textwrap.dedent(
+                """\
+                orchestrator:
+                  planning_mode: disabled
+                  evaluation_mode: disabled
+
+                agents:
+                  claude_code:
+                    type: cli
+                    command: claude
+                    description: "Claude Code"
+
+                routing:
+                  rules: []
+
+                skills: {}
+                """
+            )
+        )
+
+        config = load_config(global_config_path=global_cfg, project_dir=tmp_path)
+        assert config.orchestrator.planning_mode == "disabled"
+        assert config.orchestrator.evaluation_mode == "disabled"
+        assert config.orchestrator.model is None
 
     def test_invalid_global_config_raises(self, tmp_path):
         global_cfg = tmp_path / "config.yaml"
